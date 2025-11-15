@@ -1,11 +1,11 @@
-// main.ts (Final Smart Content-Type & Filename Version)
+// main.ts (Final Data "undefined" Fix)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 const kv = await Deno.openKv();
 const ADMIN_TOKEN = Deno.env.get("ADMIN_TOKEN") || "fallback-admin-token";
 const DOWNLOAD_TOKEN = Deno.env.get("DOWNLOAD_TOKEN") || "fallback-download-token";
 
-console.log("Smart Proxy Server is starting...");
+console.log("Smart Proxy Server (Data Fix) is starting...");
 
 function slugify(text: string): string {
     return text.toString().toLowerCase()
@@ -26,7 +26,9 @@ async function handler(req: Request): Promise<Response> {
     if (pathname === "/admin") {
         if (searchParams.get("token") !== ADMIN_TOKEN) return new Response("Forbidden", { status: 403 });
         const videos: any[] = [];
-        for await (const entry of kv.list({ prefix: ["videos"] })) { videos.push({ slug: entry.key[1], url: entry.value.url, filename: entry.value.filename }); }
+        for await (const entry of kv.list({ prefix: ["videos"] })) { 
+            videos.push({ slug: entry.key[1], ...entry.value }); 
+        }
         const generatedLinkParam = searchParams.get("generatedLink") || "";
         return new Response(getAdminPageHTML(videos, ADMIN_TOKEN, generatedLinkParam), { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
@@ -68,28 +70,17 @@ async function handler(req: Request): Promise<Response> {
             }
             
             const responseHeaders = new Headers();
+            ['Content-Length', 'Content-Range', 'Accept-Ranges'].forEach(h => { if(videoResponse.headers.has(h)) responseHeaders.set(h, videoResponse.headers.get(h)!); });
+            let ct = videoResponse.headers.get('Content-Type');
+            if (!ct || !ct.startsWith('video/')) { ct = 'video/mp4'; }
+            responseHeaders.set('Content-Type', ct);
             
-            ['Content-Length', 'Content-Range', 'Accept-Ranges'].forEach(headerName => {
-                if (videoResponse.headers.has(headerName)) {
-                    responseHeaders.set(headerName, videoResponse.headers.get(headerName)!);
-                }
-            });
-            
-            // --- THIS IS THE SMART FIX ---
-            let contentType = videoResponse.headers.get('Content-Type');
-            // If the original source gives a non-video content type, force it to video/mp4.
-            if (!contentType || !contentType.startsWith('video/')) {
-                contentType = 'video/mp4';
-            }
-            responseHeaders.set('Content-Type', contentType);
-            // --- END OF SMART FIX ---
-            
-            const shouldPlayInline = searchParams.get("play") === "true";
-            responseHeaders.set('Content-Disposition', shouldPlayInline ? 'inline' : `attachment; filename="${filename}"`);
+            const play = searchParams.get("play") === "true";
+            responseHeaders.set('Content-Disposition', play ? 'inline' : `attachment; filename="${filename}"`);
 
             return new Response(videoResponse.body, { status: videoResponse.status, headers: responseHeaders });
         } catch (e) {
-            return new Response("Error proxying the download.", { status: 500 });
+            return new Response("Error proxying.", { status: 500 });
         }
     }
 
@@ -101,7 +92,7 @@ async function handler(req: Request): Promise<Response> {
         return Response.redirect(`${url.origin}/admin?token=${ADMIN_TOKEN}`);
     }
 
-    return new Response("Not Found.", { status: 404 });
+    return new Response("Not Found", { status: 404 });
 }
 
 serve(handler);
@@ -111,11 +102,13 @@ function getLoginPageHTML(): string {
 }
 
 function getAdminPageHTML(videos: any[], token: string, generatedLink: string): string {
-    const generatedLinkHTML = generatedLink ? `<div class="result-box"><h3>Generated Link:</h3><p>To stream, add <b>&play=true</b> to the URL.</p><input type="text" id="generated-link-input" value="${decodeURIComponent(generatedLink)}" readonly><button onclick="copyLink()">Copy Link</button></div>` : '';
-    const videoRows = videos.map(v => `<tr><td><code>.../download/${v.slug}?token=...</code></td><td>${v.filename}</td><td>${v.url}</td><td><form method="POST" onsubmit="return confirm('Delete?');"><input type="hidden" name="token" value="${token}"><input type="hidden" name="slug" value="${v.slug}"><button formaction="/delete-video">Delete</button></form></td></tr>`).join('');
+    const generatedLinkHTML = generatedLink ? `<div class="result-box"><h3>Generated Link:</h3><p>To stream, add <b>&play=true</b> to URL.</p><input type="text" id="generated-link-input" value="${decodeURIComponent(generatedLink)}" readonly><button onclick="copyLink()">Copy</button></div>` : '';
+    // --- THIS IS THE FIX ---
+    const videoRows = videos.map(v => `<tr><td><code>.../download/${v.slug}?token=...</code></td><td>${v.filename || 'N/A'}</td><td>${v.url || 'N/A'}</td><td><form method="POST" onsubmit="return confirm('Delete?');"><input type="hidden" name="token" value="${token}"><input type="hidden" name="slug" value="${v.slug}"><button formaction="/delete-video">Delete</button></form></td></tr>`).join('');
+    // --- END OF FIX ---
     return `<!DOCTYPE html><html><head><title>Download Link Generator</title><style>body{font-family:sans-serif;background:#0d1117;color:#c9d1d9;padding:2rem;} .container{max-width:1000px;margin:auto;} h1,h2{color:#58a6ff;} .panel{background:#161b22;padding:2rem;border:1px solid #30363d;border-radius:8px;margin-bottom:2rem;} form{display:grid;gap:1rem;} label{font-weight:bold;} input{width:100%;padding:0.8rem;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;} button{background:#238636;color:white;padding:0.8rem;border:none;border-radius:6px;} table{width:100%;border-collapse:collapse;margin-top:1rem;table-layout:fixed;} th,td{border:1px solid #30363d;padding:0.8rem;word-wrap:break-word;} .result-box{background:#222;padding:1rem;border:1px solid #28a745; margin-top:1.5rem;}</style></head>
     <body><div class="container"><h1>Download & Stream Link Generator</h1>
-    <div class="panel"><h2>Generate New Link</h2><form action="/generate" method="POST"><input type="hidden" name="token" value="${token}"><label>Original URL:</label><input type="text" name="originalUrl" required><label>Filename (e.g., movie-name.mp4 or movie-name.mkv):</label><input type="text" name="filename" required><button type="submit">Generate Link</button></form>${generatedLinkHTML}</div>
+    <div class="panel"><h2>Generate New Link</h2><form action="/generate" method="POST"><input type="hidden" name="token" value="${token}"><label>Original URL:</label><input type="text" name="originalUrl" required><label>Filename (e.g., movie-name.mp4):</label><input type="text" name="filename" required><button type="submit">Generate Link</button></form>${generatedLinkHTML}</div>
     <div class="panel"><h2>Generated Links</h2><table><thead><tr><th>Generated Path</th><th>Filename</th><th>Original URL</th><th>Action</th></tr></thead><tbody>${videoRows}</tbody></table></div>
     <script>function copyLink(){const i=document.getElementById('generated-link-input');i.select();navigator.clipboard.writeText(i.value).then(()=>{alert('Link copied!')});}</script>
     </body></html>`;
