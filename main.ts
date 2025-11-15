@@ -1,4 +1,4 @@
-// main.ts (Final Force Playback Version)
+// main.ts (Final Video Playback Fix)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { getCookies, setCookie } from "https://deno.land/std@0.224.0/http/cookie.ts";
 
@@ -6,7 +6,7 @@ const kv = await Deno.openKv();
 const SECRET_TOKEN = Deno.env.get("SECRET_TOKEN") || "fallback-secret-token";
 const ADMIN_TOKEN = Deno.env.get("ADMIN_TOKEN") || "fallback-admin-token";
 
-console.log("Clean URL Proxy Server (Force Playback Fix) is starting...");
+console.log("Clean URL Proxy Server (Final Playback Fix) is starting...");
 
 function extractAndCleanMovieName(url: string): string {
     try {
@@ -68,27 +68,28 @@ async function handler(req: Request): Promise<Response> {
                     return new Response("Failed to fetch video.", { status: videoResponse.status });
                 }
                 
-                // --- THIS IS THE NEW AGGRESSIVE FIX ---
                 const responseHeaders = new Headers();
                 
-                // Pass through essential headers for seeking and progress
                 responseHeaders.set('Content-Length', videoResponse.headers.get('Content-Length') || '0');
                 responseHeaders.set('Accept-Ranges', 'bytes');
+                
+                // --- THIS IS THE FIX ---
+                if (videoResponse.headers.has('Content-Range')) {
+                    responseHeaders.set('Content-Range', videoResponse.headers.get('Content-Range')!);
+                }
+                // --- END OF FIX ---
 
-                // Forcefully tell the browser this is a playable video file
                 responseHeaders.set('Content-Type', 'video/mp4');
                 responseHeaders.set('Content-Disposition', 'inline');
-                
-                // For good measure
                 responseHeaders.set("Access-Control-Allow-Origin", "*");
-                // --- END OF NEW FIX ---
 
                 return new Response(videoResponse.body, { 
-                    status: videoResponse.status, // Use original status (e.g., 206 Partial Content)
-                    headers: responseHeaders // Use our newly created headers
+                    status: videoResponse.status,
+                    headers: responseHeaders 
                 });
                 
-            } catch { 
+            } catch (e) { 
+                console.error("Streaming error:", e);
                 return new Response("Error streaming video.", { status: 500 });
             }
         } else {
