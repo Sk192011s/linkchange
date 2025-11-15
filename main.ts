@@ -1,14 +1,14 @@
-// main.ts for lugyicar-application (Fixed Version)
-
+// main.ts (for lugyicar-application - FINAL Clean URL Version)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { getCookies } from "https://deno.land/std@0.224.0/http/cookie.ts";
+import { getCookies, setCookie } from "https://deno.land/std@0.224.0/http/cookie.ts";
 
 const kv = await Deno.openKv();
-const SECRET_TOKEN = Deno.env.get("SECRET_TOKEN") || "fallback-token-if-not-set-12345";
-const ADMIN_TOKEN = Deno.env.get("ADMIN_TOKEN") || "your-secret-admin-token";
+const SECRET_TOKEN = Deno.env.get("SECRET_TOKEN") || "fallback-secret-token";
+const ADMIN_TOKEN = Deno.env.get("ADMIN_TOKEN") || "fallback-admin-token";
 
-console.log("Auto-Suggest Link Generator (Fixed) is starting...");
+console.log("Clean URL Link Generator is starting...");
 
+// Helper functions
 function extractAndCleanMovieName(url: string): string {
     try {
         const pathname = new URL(url).pathname;
@@ -21,7 +21,7 @@ function extractAndCleanMovieName(url: string): string {
 }
 
 function slugify(text: string): string {
-    return text.toString().toLowerCase().replace(/\s+/g, '-').replace(/[^\w\-.]+/g, '').replace(/\-\-+/g, '-').replace(/^-+/, '').replace(/-+$/, '');
+    return text.toString().toLowerCase().replace(/\s+/g, '-').replace(/[^\w\-.]+/g, '').replace(/\-\-+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 async function handler(req: Request): Promise<Response> {
@@ -33,120 +33,105 @@ async function handler(req: Request): Promise<Response> {
         return new Response(getGeneratorPageHTML(), { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
+    // API to suggest a name from URL
     if (pathname === "/fetch-title" && method === "POST") {
         try {
             const { originalUrl } = await req.json();
             const suggestedName = extractAndCleanMovieName(originalUrl);
             return new Response(JSON.stringify({ suggestedName }), { headers: { "Content-Type": "application/json" } });
-        } catch {
-            return new Response(JSON.stringify({ suggestedName: "" }), { status: 400 });
-        }
+        } catch { return new Response(JSON.stringify({ suggestedName: "" }), { status: 400 }); }
     }
 
+    // API for the admin to generate a clean URL
     if (pathname === "/generate" && method === "POST") {
-        try {
-            const { originalUrl, movieName } = await req.json();
-            if (!originalUrl || !movieName || !originalUrl.startsWith("http")) {
-                return new Response(JSON.stringify({ error: "Invalid URL or Movie Name provided." }), { status: 400 });
-            }
-            const fileSlug = slugify(movieName);
-            await kv.set(["videos", fileSlug], originalUrl);
-            const playbackUrl = `${url.origin}/play/${fileSlug}?t=${SECRET_TOKEN}`;
-            return new Response(JSON.stringify({ playbackUrl }), { headers: { "Content-Type": "application/json" } });
-        } catch (e) {
-            return new Response(JSON.stringify({ error: "Invalid request body." }), { status: 400 });
-        }
+        const { originalUrl, movieName } = await req.json();
+        if (!originalUrl || !movieName) return new Response(JSON.stringify({ error: "Missing fields" }), { status: 400 });
+        const fileSlug = slugify(movieName);
+        await kv.set(["videos", fileSlug], originalUrl);
+        const cleanUrl = `${url.origin}/play/${fileSlug}`;
+        return new Response(JSON.stringify({ cleanUrl }), { headers: { "Content-Type": "application/json" } });
     }
 
-    const playPattern = new URLPattern({ pathname: "/play/:filename+" });
+    // This is the clean URL the user visits
+    const playPattern = new URLPattern({ pathname: "/play/:slug+" });
     if (playPattern.exec(url)) {
-        const playMatch = playPattern.exec(url)!;
-        const oneTimeToken = url.searchParams.get("t");
-        if (oneTimeToken !== SECRET_TOKEN) {
-            return new Response("Unauthorized: Invalid or missing access token.", { status: 401 });
+        const cookies = getCookies(req.headers);
+        if (cookies.access_token === SECRET_TOKEN) {
+            // User has access, stream the video
+            const slug = playPattern.exec(url)!.pathname.groups.slug!;
+            const result = await kv.get<string>(["videos", slug]);
+            const originalVideoUrl = result.value;
+            if (!originalVideoUrl) return new Response("Video not found.", { status: 404 });
+            try {
+                const range = req.headers.get("range");
+                const headers = new Headers();
+                if (range) { headers.set("range", range); }
+                const videoResponse = await fetch(originalVideoUrl, { headers });
+                if (!videoResponse.ok || !videoResponse.body) return new Response("Failed to fetch video.", { status: videoResponse.status });
+                const responseHeaders = new Headers(videoResponse.headers);
+                responseHeaders.set("Access-Control-Allow-Origin", "*");
+                return new Response(videoResponse.body, { status: videoResponse.status, headers: responseHeaders });
+            } catch { return new Response("Error streaming video.", { status: 500 }); }
+        } else {
+            // User does not have access, redirect to get a cookie
+            const slug = playPattern.exec(url)!.pathname.groups.slug!;
+            const authUrl = `${url.origin}/auth/${slug}?token=${SECRET_TOKEN}`;
+            return Response.redirect(authUrl, 302);
         }
-        const { filename } = playMatch.pathname.groups;
-        const streamUrl = `${url.origin}/stream/${filename}`;
-        const headers = new Headers({ "Location": streamUrl });
-        headers.set("Set-Cookie", `auth-token=${SECRET_TOKEN}; HttpOnly; Secure; Path=/stream; SameSite=Strict; Max-Age=86400`);
+    }
+    
+    // Intermediate auth URL to set the cookie
+    const authPattern = new URLPattern({ pathname: "/auth/:slug+" });
+    if (authPattern.exec(url)) {
+        if (searchParams.get("token") !== SECRET_TOKEN) {
+            return new Response("Unauthorized.", { status: 401 });
+        }
+        const slug = authPattern.exec(url)!.pathname.groups.slug!;
+        const finalUrl = `${url.origin}/play/${slug}`;
+        const headers = new Headers({ Location: finalUrl });
+        setCookie(headers, { name: "access_token", value: SECRET_TOKEN, maxAge: 365 * 24 * 60 * 60, path: "/", httpOnly: true, secure: true });
         return new Response(null, { status: 302, headers });
     }
 
-    const streamPattern = new URLPattern({ pathname: "/stream/:filename+" });
-    if (streamPattern.exec(url)) {
-        const streamMatch = streamPattern.exec(url)!;
-        const cookies = getCookies(req.headers);
-        if (cookies["auth-token"] !== SECRET_TOKEN) {
-            return new Response("Access Denied. Please use a valid playback link.", { status: 403 });
-        }
-        const { filename } = streamMatch.pathname.groups;
-        const result = await kv.get<string>(["videos", filename]);
-        const originalVideoUrl = result.value;
-        if (!originalVideoUrl) { return new Response("Video not found.", { status: 404 }); }
-        try {
-            const range = req.headers.get("range");
-            const headers = new Headers();
-            if (range) { headers.set("range", range); }
-            const videoResponse = await fetch(originalVideoUrl, { headers });
-            if (!videoResponse.ok || !videoResponse.body) {
-                return new Response("Failed to fetch video from source.", { status: videoResponse.status });
-            }
-            const responseHeaders = new Headers(videoResponse.headers);
-            responseHeaders.set("Access-Control-Allow-Origin", "*");
-            return new Response(videoResponse.body, { status: videoResponse.status, headers: responseHeaders });
-        } catch (error) {
-            return new Response("Internal Server Error.", { status: 500 });
-        }
-    }
-
-    return new Response("Not Found.", { status: 404 });
+    // Your existing admin routes can be added here if needed
+    
+    return new Response("Not Found", { status: 404 });
 }
 
 serve(handler);
 
 function getGeneratorPageHTML(): string {
   return `
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Auto-Suggest Link Generator</title>
-      <style>
-        :root{--bg-color:#1a1a2e;--text-color:#f0f0f0;--primary-color:#00aaff;--input-bg:#2a2a2a;--border-color:#444;--success-color:#31a34a;--admin-color:#ffae42;}
-        body{font-family:system-ui,sans-serif;background-color:var(--bg-color);color:var(--text-color);display:flex;justify-content:center;align-items:center;min-height:100vh;margin:2rem 0; flex-direction: column;}
-        .container{width:90%;max-width:600px;padding:2rem;background-color:var(--input-bg);border-radius:8px;box-shadow:0 4px 15px #0003; margin-bottom: 2rem;}
-        h1, h2{text-align:center;margin-top:0;color:var(--primary-color)}
+    <!DOCTYPE html><html lang="en">
+    <head><meta charset="UTF-8"><title>Clean Link Generator</title>
+    <style>
+        :root{--bg-color:#1a1a2e;--text-color:#f0f0f0;--primary-color:#00aaff;--input-bg:#2a2a2a;--border-color:#444;--success-color:#31a34a;}
+        body{font-family:system-ui,sans-serif;background-color:var(--bg-color);color:var(--text-color);display:flex;justify-content:center;align-items:center;min-height:100vh;margin:2rem 0;}
+        .container{width:90%;max-width:600px;padding:2rem;background-color:var(--input-bg);border-radius:8px;box-shadow:0 4px 15px #0003;}
+        h1{text-align:center;margin-top:0;color:var(--primary-color)}
         label{display:block;margin-bottom:.5rem;font-weight:bold}
-        input[type=text], input[type=password]{width:100%;padding:.75rem;margin-bottom:1.5rem;border:1px solid var(--border-color);background-color:var(--bg-color);color:var(--text-color);border-radius:4px;box-sizing:border-box}
-        button{width:100%;padding:.75rem;border:none;background-color:var(--primary-color);color:#fff;font-size:1rem;border-radius:4px;cursor:pointer;transition:background-color .2s}
-        button:hover:not(:disabled){background-color:#0088cc}button:disabled{background-color:#555;cursor:not-allowed}
+        input[type=text]{width:100%;padding:.75rem;margin-bottom:1.5rem;border:1px solid var(--border-color);background-color:var(--bg-color);color:var(--text-color);border-radius:4px;box-sizing:border-box}
+        button{width:100%;padding:.75rem;border:none;background-color:var(--primary-color);color:#fff;font-size:1rem;border-radius:4px;cursor:pointer;}
         .result-box{margin-top:1.5rem;display:none}.result-wrapper{display:flex}
         #generatedLink{flex-grow:1;background-color:#333} 
-        #copyBtn{width:auto;margin-left:.5rem;background-color:var(--success-color)}#copyBtn:hover{background-color:#267c38}
-        #adminLoginBtn { background-color: var(--admin-color); } #adminLoginBtn:hover { background-color: #d70; }
-        h2.admin-header { color: var(--admin-color); }
-      </style>
+        #copyBtn{width:auto;margin-left:.5rem;background-color:var(--success-color)}
+    </style>
     </head>
     <body>
       <div class="container">
-        <h1>Auto-Suggest Video Link Generator</h1>
+        <h1>Clean URL Generator</h1>
         <label for="originalUrl">1. Paste Original Video URL:</label>
         <input type="text" id="originalUrl" placeholder="https://example.com/The.Matrix.1999.1080p.mkv">
-        <label for="movieName">2. Verify or Edit Movie Name (add .mp4 or .mkv):</label>
+        <label for="movieName">2. Verify or Edit Movie Name (e.g., movie-name.mp4):</label>
         <input type="text" id="movieName" placeholder="Will be auto-filled...">
-        <button id="generateBtn">3. Generate Playback Link</button>
+        <button id="generateBtn">3. Generate Clean Link</button>
         <div class="result-box" id="resultBox">
-          <label for="generatedLink">Your Secure Playback Link:</label>
+          <label for="generatedLink">Your Clean URL:</label>
           <div class="result-wrapper">
             <input type="text" id="generatedLink" readonly>
             <button id="copyBtn">Copy</button>
           </div>
         </div>
-      </div>
-      <div class="container">
-        <h2 class="admin-header">Admin Login</h2>
-        <label for="adminTokenInput">Enter Admin Token:</label>
-        <input type="password" id="adminTokenInput" placeholder="Your secret admin token">
-        <button id="adminLoginBtn">Login to Admin Panel</button>
       </div>
       <script>
         const originalUrlInput = document.getElementById('originalUrl');
@@ -155,56 +140,39 @@ function getGeneratorPageHTML(): string {
         const copyBtn = document.getElementById('copyBtn');
         const resultBox = document.getElementById('resultBox');
         const generatedLinkInput = document.getElementById('generatedLink');
-        const adminTokenInput = document.getElementById('adminTokenInput');
-        const adminLoginBtn = document.getElementById('adminLoginBtn');
-
-        originalUrlInput.addEventListener('paste', (event) => {
-            const pastedText = (event.clipboardData || window.clipboardData).getData('text');
-            fetchTitle(pastedText);
-        });
-        originalUrlInput.addEventListener('blur', () => { fetchTitle(originalUrlInput.value); });
-
+        
+        originalUrlInput.addEventListener('blur', () => fetchTitle(originalUrlInput.value));
         async function fetchTitle(url) {
-            const originalUrl = url.trim();
-            if (!originalUrl.startsWith('http')) return;
+            if (!url.startsWith('http')) return;
             movieNameInput.value = 'Fetching name...';
             try {
-                const response = await fetch('/fetch-title', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ originalUrl }) });
-                if (!response.ok) throw new Error('Server could not fetch title.');
-                const { suggestedName } = await response.json();
-                const extension = originalUrl.match(/\.(mp4|mkv|avi|mov|webm)$/i);
-                const finalName = suggestedName ? (suggestedName + (extension ? extension[0] : '.mp4')) : '';
-                movieNameInput.value = finalName;
-            } catch (e) { movieNameInput.value = 'Could not guess name. Please enter manually.'; }
+                const res = await fetch('/fetch-title', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ originalUrl: url }) });
+                const { suggestedName } = await res.json();
+                const ext = url.match(/\.(mp4|mkv|avi)$/i);
+                movieNameInput.value = suggestedName ? (suggestedName + (ext ? ext[0] : '.mp4')) : '';
+            } catch (e) { movieNameInput.value = 'Could not guess name.'; }
         }
 
         generateBtn.addEventListener('click', async () => {
-          const originalUrl = originalUrlInput.value.trim();
-          const movieName = movieNameInput.value.trim();
-          if (!originalUrl || !movieName) { alert('Please fill in both fields.'); return; }
-          generateBtn.disabled = true; generateBtn.textContent = 'Generating...';
-          try {
-            const response = await fetch('/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ originalUrl, movieName }) });
-            if (!response.ok) throw new Error((await response.json()).error || 'Failed to generate link.');
-            const { playbackUrl } = await response.json();
-            generatedLinkInput.value = playbackUrl;
-            resultBox.style.display = 'block';
-          } catch (e) { alert('Error: ' + e.message);
-          } finally { generateBtn.disabled = false; generateBtn.textContent = '3. Generate Playback Link'; }
+            const originalUrl = originalUrlInput.value.trim();
+            const movieName = movieNameInput.value.trim();
+            if (!originalUrl || !movieName) return alert('Please fill all fields.');
+            generateBtn.disabled = true; generateBtn.textContent = 'Generating...';
+            try {
+                const res = await fetch('/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ originalUrl, movieName }) });
+                const { cleanUrl } = await res.json();
+                generatedLinkInput.value = cleanUrl;
+                resultBox.style.display = 'block';
+            } catch (e) { alert('Error: ' + e.message);
+            } finally { generateBtn.disabled = false; generateBtn.textContent = 'Generate Clean Link'; }
         });
 
         copyBtn.addEventListener('click', () => {
-          navigator.clipboard.writeText(generatedLinkInput.value).then(() => {
-            copyBtn.textContent = 'Copied!'; setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
-          });
-        });
-
-        adminLoginBtn.addEventListener('click', () => {
-            const token = adminTokenInput.value.trim();
-            if (token) { window.location.href = '/admin?token=' + encodeURIComponent(token); }
+            navigator.clipboard.writeText(generatedLinkInput.value).then(() => {
+                copyBtn.textContent = 'Copied!'; setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
+            });
         });
       </script>
-    </body>
-    </html>
+    </body></html>
   `;
 }
