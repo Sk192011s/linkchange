@@ -1,4 +1,4 @@
-// main.ts (Final Clean URL Proxy with Auto-Download Fix)
+// main.ts (Final Force Playback Version)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { getCookies, setCookie } from "https://deno.land/std@0.224.0/http/cookie.ts";
 
@@ -6,7 +6,7 @@ const kv = await Deno.openKv();
 const SECRET_TOKEN = Deno.env.get("SECRET_TOKEN") || "fallback-secret-token";
 const ADMIN_TOKEN = Deno.env.get("ADMIN_TOKEN") || "fallback-admin-token";
 
-console.log("Clean URL Proxy Server (Auto-Download Fix) is starting...");
+console.log("Clean URL Proxy Server (Force Playback Fix) is starting...");
 
 function extractAndCleanMovieName(url: string): string {
     try {
@@ -59,26 +59,34 @@ async function handler(req: Request): Promise<Response> {
             
             try {
                 const range = req.headers.get("range");
-                const headers = new Headers();
-                if (range) { headers.set("range", range); }
+                const fetchHeaders = new Headers();
+                if (range) { fetchHeaders.set("range", range); }
 
-                const videoResponse = await fetch(originalVideoUrl, { headers });
+                const videoResponse = await fetch(originalVideoUrl, { headers: fetchHeaders });
 
                 if (!videoResponse.ok || !videoResponse.body) {
                     return new Response("Failed to fetch video.", { status: videoResponse.status });
                 }
                 
-                const responseHeaders = new Headers(videoResponse.headers);
+                // --- THIS IS THE NEW AGGRESSIVE FIX ---
+                const responseHeaders = new Headers();
+                
+                // Pass through essential headers for seeking and progress
+                responseHeaders.set('Content-Length', videoResponse.headers.get('Content-Length') || '0');
+                responseHeaders.set('Accept-Ranges', 'bytes');
 
-                const disposition = responseHeaders.get('Content-Disposition');
-                if (disposition && disposition.includes('attachment')) {
-                    const newDisposition = disposition.replace('attachment', 'inline');
-                    responseHeaders.set('Content-Disposition', newDisposition);
-                    console.log(`Modified Content-Disposition header to: ${newDisposition}`);
-                }
-
+                // Forcefully tell the browser this is a playable video file
+                responseHeaders.set('Content-Type', 'video/mp4');
+                responseHeaders.set('Content-Disposition', 'inline');
+                
+                // For good measure
                 responseHeaders.set("Access-Control-Allow-Origin", "*");
-                return new Response(videoResponse.body, { status: videoResponse.status, headers: responseHeaders });
+                // --- END OF NEW FIX ---
+
+                return new Response(videoResponse.body, { 
+                    status: videoResponse.status, // Use original status (e.g., 206 Partial Content)
+                    headers: responseHeaders // Use our newly created headers
+                });
                 
             } catch { 
                 return new Response("Error streaming video.", { status: 500 });
@@ -195,4 +203,13 @@ function getGeneratorPageHTML(): string {
                 } finally { generateBtn.disabled = false; generateBtn.textContent = 'Generate Clean Link'; }
             });
             copyBtn.addEventListener('click', () => { navigator.clipboard.writeText(generatedLinkInput.value).then(() => { copyBtn.textContent = 'Copied!'; setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000); }); });
-            document.getElementById('adminLoginBtn').
+            document.getElementById('adminLoginBtn').addEventListener('click', () => { const token = document.getElementById('adminTokenInput').value.trim(); if(token) { window.location.href = '/admin?token=' + token; } });
+        </script>
+    </body></html>`;
+}
+
+function getAdminPageHTML(videos: any[], token: string): string {
+    const videoRows = videos.map(v => `<tr><td><code>/play/${v.slug}</code></td><td>${v.url}</td><td><form method="POST" onsubmit="return confirm('Delete this link?');"><input type="hidden" name="token" value="${token}"><input type="hidden" name="slug" value="${v.slug}"><button formaction="/delete-video">Delete</button></form></td></tr>`).join('');
+    return `<!DOCTYPE html><html><head><title>Link Management</title><style>body{font-family:sans-serif;background:#0d1117;color:#c9d1d9;padding:2rem;} .container{max-width:1000px;margin:auto;} h1{color:#58a6ff;} table{width:100%;border-collapse:collapse;margin-top:1rem;} th,td{border:1px solid #30363d;padding:0.8rem;} th{background:#21262d;} a{color:#58a6ff;}</style></head>
+    <body><div class="container"><h1>Generated Links</h1><a href="/">&larr; Back to Generator</a><table><thead><tr><th>Clean URL Path</th><th>Original URL</th><th>Action</th></tr></thead><tbody>${videoRows}</tbody></table></div></body></html>`;
+}
